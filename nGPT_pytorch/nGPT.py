@@ -3,7 +3,7 @@ from __future__ import annotations
 from functools import partial
 
 import torch
-from torch import nn
+from torch import nn, stack
 from torch.nn import Module, ModuleList
 import torch.nn.functional as F
 from torch.nn.utils.parametrize import register_parametrization
@@ -46,7 +46,7 @@ def l2norm(
 ):
     if groups > 1:
         t = t.chunk(groups, dim = dim)
-        t = torch.stack(t)
+        t = stack(t)
 
     if norm_eps == 0.:
         out = F.normalize(t, dim = dim, p = 2)
@@ -525,7 +525,8 @@ class nGPT(Module):
         self,
         ids,
         mask = None,
-        return_loss = False
+        return_loss = False,
+        return_hiddens = False
     ):
         token_embed, rotary_embed = self.token_embed.weight, self.rotary_embed
 
@@ -535,14 +536,19 @@ class nGPT(Module):
 
         tokens = token_embed[ids]
 
+        hiddens = [tokens]
+
         first_values = None
 
         for attn, ff in self.layers:
             tokens, values = attn(tokens, mask = mask, rotary_embed = rotary_embed, return_values = True, value_residual = first_values if self.add_value_residual else None)
 
+            hiddens.append(tokens)
             first_values = default(first_values, values)
 
             tokens = ff(tokens)
+
+            hiddens.append(tokens)
 
         if exists(self.to_logits):
             logits = self.to_logits(tokens)
@@ -552,8 +558,21 @@ class nGPT(Module):
 
         logits = logits * self.logit_scale()
 
+        # maybe return hiddens
+
+        if return_hiddens:
+            hiddens = stack(hiddens)
+
+        # maybe loss
+
         if not return_loss:
-            return logits
+
+            if not return_hiddens:
+                return logits
+
+            return logits, hiddens
+
+        # autoregressive loss
 
         loss = F.cross_entropy(
             rearrange(logits, 'b n c -> b c n'),
@@ -561,4 +580,7 @@ class nGPT(Module):
             ignore_index = self.ignore_index
         )
 
-        return loss
+        if not return_hiddens:
+            return loss
+
+        return loss, hiddens
